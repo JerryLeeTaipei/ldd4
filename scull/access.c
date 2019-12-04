@@ -30,6 +30,7 @@
 #include <linux/list.h>
 #include <linux/sched.h>
 #include <linux/spinlock_types.h>
+#include <linux/sched/signal.h>
 
 #include "scull.h"        /* local definitions */
 
@@ -96,7 +97,7 @@ struct file_operations scull_sngl_fops = {
 
 static struct scull_dev scull_u_device;
 static int scull_u_count;	/* initialized to 0 by default */
-static uid_t scull_u_owner;	/* initialized to 0 by default */
+static kuid_t scull_u_owner;	/* initialized to 0 by default */
 DEFINE_SPINLOCK(scull_u_lock);
 
 static int scull_u_open(struct inode *inode, struct file *filp)
@@ -105,15 +106,15 @@ static int scull_u_open(struct inode *inode, struct file *filp)
 
 	spin_lock(&scull_u_lock);
 	if (scull_u_count && 
-			(scull_u_owner != current->cred->uid) &&  /* allow user */
-			(scull_u_owner != current->cred->euid) && /* allow whoever did su */
+			( !uid_eq(scull_u_owner , current_uid())	)&&//current->cred->uid) &&  /* allow user */
+			( !uid_eq(scull_u_owner , current_euid())	) && /* allow whoever did su */
 			!capable(CAP_DAC_OVERRIDE)) { /* still allow root */
 		spin_unlock(&scull_u_lock);
 		return -EBUSY;   /* -EPERM would confuse the user */
 	}
 
-	if (scull_u_count == 0)
-		scull_u_owner = current->cred->uid; /* grab it */
+	if (scull_u_count == 0)	    
+		scull_u_owner = current_uid(); /* grab it */
 
 	scull_u_count++;
 	spin_unlock(&scull_u_lock);
@@ -157,15 +158,15 @@ struct file_operations scull_user_fops = {
 
 static struct scull_dev scull_w_device;
 static int scull_w_count;	/* initialized to 0 by default */
-static uid_t scull_w_owner;	/* initialized to 0 by default */
+static kuid_t scull_w_owner;	/* initialized to 0 by default */
 static DECLARE_WAIT_QUEUE_HEAD(scull_w_wait);
 DEFINE_SPINLOCK(scull_w_lock);
 
 static inline int scull_w_available(void)
 {
 	return scull_w_count == 0 ||
-		scull_w_owner == current->cred->uid ||
-		scull_w_owner == current->cred->euid ||
+		uid_eq(scull_u_owner , current_uid()) ||
+		uid_eq(scull_u_owner , current_euid()) ||
 		capable(CAP_DAC_OVERRIDE);
 }
 
@@ -410,3 +411,4 @@ void scull_access_cleanup(void)
 	unregister_chrdev_region(scull_a_firstdev, SCULL_N_ADEVS);
 	return;
 }
+
