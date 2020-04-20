@@ -26,9 +26,10 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
-
+#include <linux/seq_file.h>
 #include <asm/hardirq.h>
 
+#include <linux/uaccess.h>
 /*
  * This module is a silly one: it only embeds short code fragments
  * that show how time delays can be handled in the kernel.
@@ -52,45 +53,8 @@ enum jit_files {
 	JIT_QUEUE,
 	JIT_SCHEDTO
 };
+#if 0
 
-/*
- * This function prints one line of data, after sleeping one second.
- * It can sleep in different ways, according to the data pointer
- */
-int jit_fn(char *buf, char **start, off_t offset,
-	      int len, int *eof, void *data)
-{
-	unsigned long j0, j1; /* Jiffies. */
-	wait_queue_head_t wait;
-
-	init_waitqueue_head(&wait);
-	j0 = jiffies;
-	j1 = j0 + delay;
-
-	switch((long)data) {
-		case JIT_BUSY:
-			while (time_before(jiffies, j1))
-				cpu_relax();
-			break;
-		case JIT_SCHED:
-			while (time_before(jiffies, j1)) {
-				schedule();
-			}
-			break;
-		case JIT_QUEUE:
-			wait_event_interruptible_timeout(wait, 0, delay);
-			break;
-		case JIT_SCHEDTO:
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(delay);
-			break;
-	}
-	j1 = jiffies; /* Actual value after we delayed. */
-
-	len = sprintf(buf, "%9li %9li\n", j0, j1);
-	*start = buf;
-	return len;
-}
 
 /*
  * This file, on the other hand, returns the current time forever.
@@ -260,33 +224,115 @@ int jit_tasklet(char *buf, char **start, off_t offset,
 }
 
 
+#endif
+static struct proc_dir_entry *proc_jit_dir;
+
+
+
+
+static ssize_t mywrite(struct file *file, const char __user *ubuf,size_t count, loff_t *ppos) 
+{
+	printk( KERN_INFO "write handler\n");
+	return -1;
+}
+
+#define BUFSIZE 21
+
+/*
+ * This function prints one line of data, after sleeping one second.
+ * It can sleep in different ways, according to the data pointer
+ */
+static ssize_t myread(struct file *file, char __user *ubuf, size_t count, loff_t *ppos) 
+{
+	unsigned long j0, j1; /* Jiffies. */
+	
+	char buf[BUFSIZE];
+	int len=0;
+	
+	printk( KERN_INFO "read handler, %p\n", ppos);
+
+	if(*ppos > 0 || count < BUFSIZE) {
+		printk( KERN_INFO "myread(): failed, input pos(%lld), count(%d)\n", *ppos, count);
+		return 0;
+	}
+	j0 = jiffies;
+	j1 = j0 + delay;
+
+	// JIT_BUSY	
+	printk( KERN_INFO "To delay %d jiffies\n", delay);	
+	while (time_before(jiffies, j1))
+			cpu_relax();
+
+#if 0
+		case JIT_SCHED:
+			while (time_before(jiffies, j1)) {
+				schedule();
+			}
+			break;
+		case JIT_QUEUE:
+			wait_event_interruptible_timeout(wait, 0, delay);
+			break;
+		case JIT_SCHEDTO:
+			set_current_state(TASK_INTERRUPTIBLE);
+			schedule_timeout(delay);
+			break;
+#endif	
+
+	j1 = jiffies; /* Actual value after we delayed. */
+	len = snprintf(buf, BUFSIZE, "%9li %9li\n", j0, j1);
+	if (copy_to_user(ubuf,buf,len) )
+		return -EFAULT;
+
+	*ppos = len;
+	printk( KERN_INFO "myread(end): %lu - %lu\n", j0, j1);
+	return len;
+
+}
+static const struct file_operations jitbusy_ops = {
+	.owner = THIS_MODULE,
+	.read = myread,
+	.write = mywrite,
+};
 
 static int __init jit_init(void)
 {
-	create_proc_read_entry("currentime", 0, NULL, jit_currentime, NULL);
-	create_proc_read_entry("jitbusy", 0, NULL, jit_fn, (void *)JIT_BUSY);
-	create_proc_read_entry("jitsched",0, NULL, jit_fn, (void *)JIT_SCHED);
-	create_proc_read_entry("jitqueue",0, NULL, jit_fn, (void *)JIT_QUEUE);
-	create_proc_read_entry("jitschedto", 0, NULL, jit_fn, (void *)JIT_SCHEDTO);
+    struct proc_dir_entry *entry;
 
-	create_proc_read_entry("jitimer", 0, NULL, jit_timer, NULL);
-	create_proc_read_entry("jitasklet", 0, NULL, jit_tasklet, NULL);
-	create_proc_read_entry("jitasklethi", 0, NULL, jit_tasklet, (void *)1);
+	proc_jit_dir = proc_mkdir("jit", NULL);
+	if ( !proc_jit_dir)
+		return -ENOMEM;
+		
+	entry = proc_create("jitbusy", 0, proc_jit_dir, &jitbusy_ops);
+	if (entry == NULL)
+	{
+		printk(KERN_WARNING "Failed to register /proc/sysemu\n");
+		return 0;
+	}
+	
+	//create_proc_read_entry("currentime", 0, NULL, jit_currentime, NULL);
+	//create_proc_read_entry("jitsched",0, NULL, jit_fn, (void *)JIT_SCHED);
+	//create_proc_read_entry("jitqueue",0, NULL, jit_fn, (void *)JIT_QUEUE);
+	//create_proc_read_entry("jitschedto", 0, NULL, jit_fn, (void *)JIT_SCHEDTO);
+
+	//create_proc_read_entry("jitimer", 0, NULL, jit_timer, NULL);
+	//create_proc_read_entry("jitasklet", 0, NULL, jit_tasklet, NULL);
+	//create_proc_read_entry("jitasklethi", 0, NULL, jit_tasklet, (void *)1);
 
 	return 0; /* Success. */
 }
 
 static void __exit jit_cleanup(void)
 {
-	remove_proc_entry("currentime", NULL);
-	remove_proc_entry("jitbusy", NULL);
-	remove_proc_entry("jitsched", NULL);
-	remove_proc_entry("jitqueue", NULL);
-	remove_proc_entry("jitschedto", NULL);
+	//remove_proc_entry("currentime", NULL);
+	//remove_proc_entry("jitsched", NULL);
+	//remove_proc_entry("jitqueue", NULL);
+	//remove_proc_entry("jitschedto", NULL);
 
-	remove_proc_entry("jitimer", NULL);
-	remove_proc_entry("jitasklet", NULL);
-	remove_proc_entry("jitasklethi", NULL);
+	//remove_proc_entry("jitimer", NULL);
+	//remove_proc_entry("jitasklet", NULL);
+	//remove_proc_entry("jitasklethi", NULL);
+	remove_proc_entry("jitbusy", proc_jit_dir);
+	remove_proc_entry("jit", NULL);
 }
 
 module_init(jit_init);
