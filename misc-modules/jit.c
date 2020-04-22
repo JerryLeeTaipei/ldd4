@@ -29,6 +29,7 @@
 #include <linux/seq_file.h>
 #include <asm/hardirq.h>
 
+#include <linux/slab.h>
 #include <linux/uaccess.h>
 /*
  * This module is a silly one: it only embeds short code fragments
@@ -46,13 +47,7 @@ module_param(tdelay, int, 0);
 MODULE_AUTHOR("Alessandro Rubini");
 MODULE_LICENSE("Dual BSD/GPL");
 
-/* Use these as data pointers, to implement four files in one function. */
-enum jit_files {
-	JIT_BUSY,
-	JIT_SCHED,
-	JIT_QUEUE,
-	JIT_SCHEDTO
-};
+
 #if 0
 
 
@@ -238,6 +233,55 @@ static ssize_t mywrite(struct file *file, const char __user *ubuf,size_t count, 
 
 #define BUFSIZE 21
 
+/* Use these as data pointers, to implement four files in one function. */
+enum jit_files {
+	JIT_BUSY=1,
+	JIT_SCHED,
+	JIT_QUEUE,
+	JIT_SCHEDTO
+};
+
+typedef struct jit_device	jit_device_t;
+struct jit_device{
+	int	type;
+	wait_queue_head_t	wq;
+};
+
+static int myopen(struct inode *inode , struct file *file){
+	struct dentry *dentry;	
+	jit_device_t *private_data;
+
+	dentry = file->f_path.dentry;
+	printk( KERN_INFO "file name=%s\n", dentry->d_name.name);
+
+	private_data = (jit_device_t *) kmalloc( sizeof(jit_device_t), GFP_KERNEL);
+	// set type
+	if ( !strncmp("jitbusy", dentry->d_name.name, 7) )
+		private_data->type = JIT_BUSY;
+	else if ( !strncmp("jitsched", dentry->d_name.name, 7) )
+		private_data->type = JIT_SCHED;
+	else if ( !strncmp("jitqueue", dentry->d_name.name, 7) )
+		private_data->type = JIT_QUEUE;
+	else if ( !strncmp("jitschedto", dentry->d_name.name, 7) )
+		private_data->type = JIT_SCHEDTO;
+	else
+		private_data->type = 0;
+	// init wqit queue head
+	init_waitqueue_head(&(private_data->wq));
+
+	file->private_data = private_data;
+	return 0;
+}
+
+static int myrelease(struct inode *inode , struct file *file){
+
+	printk( KERN_INFO "release\n");
+	if ( file->private_data )
+		kfree(file->private_data);
+
+	return 0;
+}
+
 /*
  * This function prints one line of data, after sleeping one second.
  * It can sleep in different ways, according to the data pointer
@@ -245,38 +289,37 @@ static ssize_t mywrite(struct file *file, const char __user *ubuf,size_t count, 
 static ssize_t myread(struct file *file, char __user *ubuf, size_t count, loff_t *ppos) 
 {
 	unsigned long j0, j1; /* Jiffies. */
-	
+	jit_device_t *private_data;
+
 	char buf[BUFSIZE];
 	int len=0;
 	
-	printk( KERN_INFO "read handler, %p\n", ppos);
+	private_data = file->private_data;
+	printk( KERN_INFO "read handler for type#%d\n", private_data->type );
 
+	
 	if(*ppos > 0 || count < BUFSIZE) {
 		printk( KERN_INFO "myread(): failed, input pos(%lld), count(%d)\n", *ppos, count);
 		return 0;
 	}
+
+	printk( KERN_INFO "To delay %d jiffies\n", delay);	
 	j0 = jiffies;
 	j1 = j0 + delay;
 
-	// JIT_BUSY	
-	printk( KERN_INFO "To delay %d jiffies\n", delay);	
-	while (time_before(jiffies, j1))
+	if ( private_data->type == JIT_BUSY ) { 
+		while ( time_before(jiffies, j1) )
 			cpu_relax();
-
-#if 0
-		case JIT_SCHED:
-			while (time_before(jiffies, j1)) {
-				schedule();
-			}
-			break;
-		case JIT_QUEUE:
-			wait_event_interruptible_timeout(wait, 0, delay);
-			break;
-		case JIT_SCHEDTO:
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(delay);
-			break;
-#endif	
+	} else if ( private_data->type == JIT_SCHED ) {
+		while ( time_before(jiffies, j1) ) 
+			schedule();
+	} else if ( private_data->type == JIT_SCHEDTO ) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout(delay);
+	} else if ( private_data->type == JIT_QUEUE ) {
+		wait_event_interruptible_timeout(private_data->wq, 0, delay);
+	} else
+		printk( KERN_INFO "not supported type#%d\n", private_data->type);
 
 	j1 = jiffies; /* Actual value after we delayed. */
 	len = snprintf(buf, BUFSIZE, "%9li %9li\n", j0, j1);
@@ -288,8 +331,10 @@ static ssize_t myread(struct file *file, char __user *ubuf, size_t count, loff_t
 	return len;
 
 }
-static const struct file_operations jitbusy_ops = {
+static const struct file_operations jit_ops = {
 	.owner = THIS_MODULE,
+	.open = myopen,
+	.release = myrelease,
 	.read = myread,
 	.write = mywrite,
 };
@@ -302,18 +347,32 @@ static int __init jit_init(void)
 	if ( !proc_jit_dir)
 		return -ENOMEM;
 		
-	entry = proc_create("jitbusy", 0, proc_jit_dir, &jitbusy_ops);
+	entry = proc_create("jitbusy", 0, proc_jit_dir, &jit_ops);
 	if (entry == NULL)
 	{
-		printk(KERN_WARNING "Failed to register /proc/sysemu\n");
+		printk(KERN_WARNING "Failed to register /proc/jit/jitbusy\n");
 		return 0;
 	}
-	
-	//create_proc_read_entry("currentime", 0, NULL, jit_currentime, NULL);
-	//create_proc_read_entry("jitsched",0, NULL, jit_fn, (void *)JIT_SCHED);
-	//create_proc_read_entry("jitqueue",0, NULL, jit_fn, (void *)JIT_QUEUE);
-	//create_proc_read_entry("jitschedto", 0, NULL, jit_fn, (void *)JIT_SCHEDTO);
+	entry = proc_create("jitsched", 0, proc_jit_dir, &jit_ops);
+	if (entry == NULL)
+	{
+		printk(KERN_WARNING "Failed to register /proc/jit/jitsched\n");
+		return 0;
+	}
+	entry = proc_create("jitschedto", 0, proc_jit_dir, &jit_ops);
+	if (entry == NULL)
+	{
+		printk(KERN_WARNING "Failed to register /proc/jit/jitschedto\n");
+		return 0;
+	}
+	entry = proc_create("jitqueue", 0, proc_jit_dir, &jit_ops);
+	if (entry == NULL)
+	{
+		printk(KERN_WARNING "Failed to register /proc/jit/jitqueue\n");
+		return 0;
+	}
 
+	//create_proc_read_entry("currentime", 0, NULL, jit_currentime, NULL);
 	//create_proc_read_entry("jitimer", 0, NULL, jit_timer, NULL);
 	//create_proc_read_entry("jitasklet", 0, NULL, jit_tasklet, NULL);
 	//create_proc_read_entry("jitasklethi", 0, NULL, jit_tasklet, (void *)1);
@@ -324,14 +383,16 @@ static int __init jit_init(void)
 static void __exit jit_cleanup(void)
 {
 	//remove_proc_entry("currentime", NULL);
-	//remove_proc_entry("jitsched", NULL);
-	//remove_proc_entry("jitqueue", NULL);
-	//remove_proc_entry("jitschedto", NULL);
+
+
 
 	//remove_proc_entry("jitimer", NULL);
 	//remove_proc_entry("jitasklet", NULL);
 	//remove_proc_entry("jitasklethi", NULL);
 	remove_proc_entry("jitbusy", proc_jit_dir);
+	remove_proc_entry("jitsched", proc_jit_dir);
+	remove_proc_entry("jitqueue", proc_jit_dir);
+	remove_proc_entry("jitschedto", proc_jit_dir);
 	remove_proc_entry("jit", NULL);
 }
 
